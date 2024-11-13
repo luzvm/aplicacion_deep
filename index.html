@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Detector de Lenguaje de Señas</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.13.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f0f0f0;
+        }
+        .container {
+            position: relative;
+            margin-bottom: 20px;
+        }
+        #output_canvas {
+            border: 2px solid #333;
+            border-radius: 8px;
+        }
+        .controls {
+            margin: 20px 0;
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+        #startButton {
+            background-color: #4CAF50;
+            color: white;
+        }
+        #stopButton {
+            background-color: #f44336;
+            color: white;
+        }
+        button:hover {
+            opacity: 0.8;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #videoElement {
+            border: 2px solid #333;
+            border-radius: 8px;
+            display: none;
+        }
+        .subtitle {
+            width: 640px;
+            min-height: 50px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-size: 18px;
+        }
+        #currentPrediction {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Detector de Lenguaje de Señas</h1>
+    <div class="controls">
+        <button id="startButton">Iniciar Cámara</button>
+        <button id="stopButton" disabled>Detener Cámara</button>
+    </div>
+    <div class="container">
+        <video id="videoElement" width="640" height="480" autoplay></video>
+        <canvas id="output_canvas" width="640" height="480"></canvas>
+        <div id="currentPrediction"></div>
+    </div>
+    <div class="subtitle" id="subtitleText"></div>
+
+    <script>
+        // Diccionario de etiquetas
+        const labelsDict = {
+            0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E', 5: 'F', 6: 'G',
+            7: 'H', 8: 'I', 9: 'J', 10: 'K', 11: 'L', 12: 'M',
+            13: 'N', 14: 'O', 15: 'P', 16: 'Q', 17: 'R', 18: 'S',
+            19: 'T', 20: 'U', 21: 'V', 22: 'W', 23: 'X', 24: 'Y',
+            25: 'Z', 26: 'Hola', 27: 'Gracias', 28: 'Adiós',
+            29: 'Por favor', 30: 'Sí', 31: 'No', 32: '¿Cómo estás?',
+            33: 'Bien', 34: 'Mal', 35: 'Amigo', 36: 'Familia',
+            37: 'Comida', 38: 'Agua', 39: 'Ayuda', 40: 'estudiantes', 
+            41: 'de nada', 42: 'buenos dias', 43: 'buenas tardes',
+            44: 'buenas noches'
+        };
+
+        let model;
+        let currentLabel = "";
+        let startTime = null;
+        let subtitleText = "";
+        let camera = null;
+        let streamActive = false;
+        const MAX_TEXT_LENGTH = 200;
+
+        const videoElement = document.getElementById('videoElement');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const currentPredictionElement = document.getElementById('currentPrediction');
+        const subtitleElement = document.getElementById('subtitleText');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+
+        // Inicializar MediaPipe Hands
+        const hands = new Hands({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        // Cargar el modelo TensorFlow.js
+        async function loadModel() {
+            try {
+                model = await tf.loadLayersModel('model.json');
+                console.log('Modelo cargado exitosamente');
+            } catch (error) {
+                console.error('Error al cargar el modelo:', error);
+            }
+        }
+
+        // Procesar landmarks de la mano
+        function processLandmarks(landmarks) {
+            const dataAux = [];
+            const x = [];
+            const y = [];
+
+            landmarks.forEach(landmark => {
+                x.push(landmark.x);
+                y.push(landmark.y);
+            });
+
+            const xMin = Math.min(...x);
+            const yMin = Math.min(...y);
+
+            landmarks.forEach(landmark => {
+                dataAux.push(landmark.x - xMin);
+                dataAux.push(landmark.y - yMin);
+            });
+
+            const maxLen = 84;
+            if (dataAux.length > maxLen) {
+                return dataAux.slice(0, maxLen);
+            }
+            while (dataAux.length < maxLen) {
+                dataAux.push(0);
+            }
+
+            return dataAux;
+        }
+
+        // Realizar predicción
+        async function predict(processedLandmarks) {
+            const tensor = tf.tensor2d([processedLandmarks], [1, 84]);
+            const prediction = await model.predict(tensor).array();
+            const predictedClass = prediction[0].indexOf(Math.max(...prediction[0]));
+            tensor.dispose();
+            return labelsDict[predictedClass] || "Desconocido";
+        }
+
+        hands.onResults(async (results) => {
+            if (!streamActive) return;
+
+            // Limpiar el canvas
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                // Dibujar landmarks
+                for (const landmarks of results.multiHandLandmarks) {
+                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS,
+                        {color: '#00FF00', lineWidth: 5});
+                    drawLandmarks(canvasCtx, landmarks,
+                        {color: '#FF0000', lineWidth: 2});
+
+                    // Procesar landmarks y hacer predicción
+                    const processedLandmarks = processLandmarks(landmarks);
+                    const predictedLabel = await predict(processedLandmarks);
+
+                    // Actualizar predicción actual y subtítulos
+                    if (predictedLabel === currentLabel) {
+                        if (!startTime) {
+                            startTime = Date.now();
+                        } else if (Date.now() - startTime >= 1000) {
+                            subtitleText += `${predictedLabel} `;
+                            if (subtitleText.length > MAX_TEXT_LENGTH) {
+                                subtitleText = "";
+                            }
+                            currentLabel = "";
+                            startTime = null;
+                            subtitleElement.textContent = subtitleText;
+                        }
+                    } else {
+                        currentLabel = predictedLabel;
+                        startTime = Date.now();
+                    }
+
+                    currentPredictionElement.textContent = predictedLabel;
+                }
+            }
+        });
+
+        // Funciones de control de la cámara
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: 640,
+                        height: 480
+                    } 
+                });
+                videoElement.srcObject = stream;
+                streamActive = true;
+                
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        if (streamActive) {
+                            await hands.send({image: videoElement});
+                        }
+                    },
+                    width: 640,
+                    height: 480
+                });
+                await camera.start();
+                
+                startButton.disabled = true;
+                stopButton.disabled = false;
+            } catch (error) {
+                console.error('Error al iniciar la cámara:', error);
+                alert('Error al acceder a la cámara. Por favor, asegúrate de dar permisos.');
+            }
+        }
+
+        async function stopCamera() {
+            if (videoElement.srcObject) {
+                const tracks = videoElement.srcObject.getTracks();
+                tracks.forEach(track => track.stop());
+                videoElement.srcObject = null;
+            }
+            if (camera) {
+                await camera.stop();
+            }
+            streamActive = false;
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            currentPredictionElement.textContent = '';
+            startButton.disabled = false;
+            stopButton.disabled = true;
+        }
+
+        // Event listeners para los botones
+        startButton.addEventListener('click', startCamera);
+        stopButton.addEventListener('click', stopCamera);
+
+        // Inicializar la aplicación
+        async function initializeApp() {
+            await loadModel();
+            // No iniciamos la cámara automáticamente
+            console.log('Aplicación inicializada. Presiona "Iniciar Cámara" para comenzar.');
+        }
+
+        initializeApp();
+    </script>
+</body>
+</html>
